@@ -31,13 +31,15 @@ python main.py
 ## CLI usage
 
 ```bash
-python main.py --cli -i input.mkv -o output.mkv
+python main.py --cli scan input.mkv          # show media info
+python main.py --cli presets                 # list available presets
+python main.py --cli encode input.mkv -o output.mkv   # encode a file
 ```
 
-Full CLI arguments:
+Full CLI help:
 
-```
-python main.py --cli --help
+```bash
+python main.py --cli encode --help
 ```
 
 ## Building

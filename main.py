@@ -4,6 +4,7 @@ BluPress — Blu-ray & DVD Compressor
 A modern tkinter GUI for FFmpeg-based video compression.
 """
 
+import sys
 import tkinter as tk
 
 try:
@@ -17,6 +18,9 @@ except ImportError:
 from blupress.app import BluPress
 
 if __name__ == '__main__':
+    if '--cli' in sys.argv:
+        from blupress.cli import main as cli_main
+        sys.exit(cli_main())
     root = ROOT()
     app = BluPress(root)
     root.mainloop()
