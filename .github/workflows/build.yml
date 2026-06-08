@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller
+      - run: pyinstaller BluPress.spec
+      - run: |
+          chmod +x dist/BluPress
+          mkdir -p BluPress.AppDir/usr/bin
+          cp dist/BluPress BluPress.AppDir/usr/bin/
+          cp favicon.png BluPress.AppDir/BluPress.png
+          cp favicon.ico BluPress.AppDir/
+          cat > BluPress.AppDir/BluPress.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=BluPress
+          Comment=Blu-ray & DVD Compressor
+          Exec=BluPress
+          Icon=BluPress
+          Categories=AudioVideo;Video;
+          Terminal=false
+          EOF
+          ln -sf BluPress.png BluPress.AppDir/.DirIcon
+          cat > BluPress.AppDir/AppRun <<'APPRUN'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export PATH="${HERE}/usr/bin:${PATH}"
+          exec "${HERE}/usr/bin/BluPress" "$@"
+          APPRUN
+          chmod +x BluPress.AppDir/AppRun
+      - uses: AppImageCrafters/appimage-builder-action@v1
+        with:
+          recipe: |
+            version: 1
+            AppDir:
+              path: ./BluPress.AppDir
+            AppImage:
+              path: ./BluPress-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BluPress-Linux
+          path: BluPress-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller
+      - run: pyinstaller BluPress.spec --distpath dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BluPress-Windows
+          path: dist/BluPress.exe
