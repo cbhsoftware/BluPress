@@ -133,10 +133,12 @@ class DropTarget:
 class DropEntry(tk.Entry, DropTarget):
     """Entry widget with drag-and-drop support."""
 
-    def __init__(self, parent, textvariable, on_drop=None, browse_cmd=None, **kw):
+    def __init__(self, parent, textvariable, on_drop=None, browse_cmd=None,
+                 browse_folder_cmd=None, **kw):
         tk.Entry.__init__(self, parent, textvariable=textvariable, **kw)
         self._on_drop_callback = on_drop
         self._browse_cmd = browse_cmd
+        self._browse_folder_cmd = browse_folder_cmd
         self._placeholder_shown = False
         DropTarget.__init__(self)
 
@@ -156,8 +158,8 @@ class DropEntry(tk.Entry, DropTarget):
     def _on_right_click(self, event):
         menu = tk.Menu(self, tearoff=0, bg=C['panel2'], fg=C['white'],
                        activebackground=C['amber_dim'], activeforeground=C['white'])
-        menu.add_command(label='Browse File...', command=self._browse_cmd if self._browse_cmd else self._on_double_click_nop)
-        menu.add_command(label='Browse Folder...', command=self._browse_folder_cmd if hasattr(self, '_browse_folder_cmd') else self._on_double_click_nop)
+        menu.add_command(label='Browse File...', command=self._browse_cmd or self._on_double_click_nop)
+        menu.add_command(label='Browse Folder...', command=getattr(self, '_browse_folder_cmd', None) or self._on_double_click_nop)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -376,7 +378,7 @@ class VUMeter(tk.Canvas):
         if self._aid:
             self.after_cancel(self._aid)
         diff = self._target - self._pct
-        if abs(diff) < 0.3:
+        if abs(diff) < 0.05:
             self._pct = self._target
             self._draw()
             return

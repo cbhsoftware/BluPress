@@ -12,10 +12,17 @@ GUI app to encode Blu-ray and DVD video files using FFmpeg.
 - Scaling/cropping/deinterlace
 - CRF slider with estimated file size
 - 2-pass encode with target bitrate
-- Chapter handling
-- Queue processing
-- Command line mode for headless use
-- Presets for DVD/Blu-ray/4K video with automatic detection
+- **10-bit** video encoding switch
+- **Denoising** filter: hqdn3d (quick), nlmeans (best quality)
+- **Stabilizing** of video (vidstab), detection, and transforming processes
+- **Pure audio** conversion option
+- **Subtitles extraction** into a file and importing of external subtitles (in format .srt/.ass)
+- **Preview** of video with frame saving in JPEG, PNG, BMP formats
+- **Suspend/continue** video encoding
+- **Multilingual** interface: English, French, German, Russian
+- Chapters support
+- Queuing with drag-and-drop reordering
+- Preset profile for DVD, Blu-ray, and 4K videos with auto-detection
 
 ## Requirements
 

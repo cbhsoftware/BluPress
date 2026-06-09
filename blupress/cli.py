@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from blupress.constants import _quote_path_for_filter
+from blupress.constants import FRAMERATE_MAP, HDR_MODES, _quote_path_for_filter, DENOISE_MODES, STABILIZE_MODES
 from blupress.models import QueueItem
 from blupress.presets import STOCK_PRESETS
 
@@ -388,6 +388,8 @@ def build_encode_settings(args) -> dict:
         'aspect_ratio':   'Source',
         'anamorphic':     False,
         'deinterlace':    args.deinterlace or 'None',
+        'framerate':      args.framerate,
+        'hdr_mode':       args.hdr_mode,
         'use_nvenc':      args.hw == 'nvenc',
         'use_qsv':        args.hw == 'qsv',
         'use_amf':        args.hw == 'amf',
@@ -401,6 +403,10 @@ def build_encode_settings(args) -> dict:
         'sub_idx':        None,
         'sub_is_bitmap':  False,
         'audio_tracks':   [],
+        'ten_bit':        args.ten_bit,
+        'audio_only':     args.audio_only,
+        'denoise':        args.denoise,
+        'stabilize':      args.stabilize,
     }
 
     # Apply preset if given
@@ -426,6 +432,10 @@ def build_encode_settings(args) -> dict:
         settings['target_bitrate'] = args.bitrate
     if args.two_pass:
         settings['two_pass'] = True
+    if args.framerate != 'Source':
+        settings['framerate'] = args.framerate
+    if args.hdr_mode != 'None (passthrough)':
+        settings['hdr_mode'] = args.hdr_mode
 
     return settings
 
@@ -469,11 +479,23 @@ def main():
                        help='Target resolution (e.g. "1080p (1920x1080)", "Source")')
     enc_p.add_argument('--deinterlace', default='',
                        help='Deinterlacing filter (Yadif (fast), BWDIF, etc.)')
+    enc_p.add_argument('--framerate', default='Source',
+                       choices=list(FRAMERATE_MAP.keys()),
+                       help='Target framerate (default: Source)')
+    enc_p.add_argument('--hdr-mode', default='None (passthrough)',
+                       choices=HDR_MODES,
+                       help='HDR/Dolby Vision handling (default: None (passthrough))')
     enc_p.add_argument('--two-pass', action='store_true', help='Enable two-pass encoding')
     enc_p.add_argument('--bitrate', default='4000k', help='Target bitrate for two-pass (default: 4000k)')
     enc_p.add_argument('--burn-subs', action='store_true', help='Burn subtitles into video')
     enc_p.add_argument('--no-chapters', action='store_true', help='Discard chapter metadata')
     enc_p.add_argument('--preset-name', help='Start from a stock preset name (partial match)')
+    enc_p.add_argument('--denoise', default='None', choices=DENOISE_MODES,
+                       help='Denoise filter (default: None)')
+    enc_p.add_argument('--stabilize', default='None', choices=STABILIZE_MODES,
+                       help='Video stabilization (default: None)')
+    enc_p.add_argument('--10-bit', action='store_true', dest='ten_bit', help='Enable 10-bit encoding')
+    enc_p.add_argument('--audio-only', action='store_true', help='Extract audio only (no video)')
     enc_p.add_argument('--audio', default='copy',
                        help='Audio codec or "copy" (default: copy)')
     enc_p.add_argument('--audio-bitrate', default='192k', help='Audio bitrate (default: 192k)')

@@ -17,6 +17,14 @@ from blupress.constants import (
     C, THEMES, MONO, UI, UI_B, TINY, SMALL,
     HAS_PLYER, _lbl, _sep, _entry, _combo, _check,
     _quote_path_for_filter, _notify, _fmt_size, _configure_ttk,
+    _get_ffprobe_path,
+    CODEC_MAP_SW, RES_MAP, AR_MAP, DEINT_MAP, BITMAP_SUB_FORMATS,
+    FRAMERATE_MAP, HDR_MODES,
+    QUICK_PRESET_MAP, CODEC_SIZE_FACTOR, HW_SIZE_FACTOR,
+    SW_PRESET_SPEED_MULTIPLIER,
+    DENOISE_MODES, DENOISE_FILTER_MAP,
+    STABILIZE_MODES, STABILIZE_FILTER_MAP,
+    LANG_NAMES, _, set_lang,
 )
 from blupress.widgets import (
     AmberButton, DropEntry, DropListbox,
@@ -25,6 +33,7 @@ from blupress.widgets import (
 )
 from blupress.models import QueueItem
 from blupress.presets import STOCK_PRESETS
+from blupress import encoder, scanner
 
 
 class BluPress:
@@ -54,6 +63,8 @@ class BluPress:
         self.aspect_ratio    = tk.StringVar(value='Source')
         self.anamorphic      = tk.BooleanVar(value=False)
         self.deinterlace     = tk.StringVar(value='None')
+        self.framerate       = tk.StringVar(value='Source')
+        self.hdr_mode        = tk.StringVar(value='None (passthrough)')
         self.use_nvenc       = tk.BooleanVar(value=False)
         self.use_qsv         = tk.BooleanVar(value=False)
         self.use_amf         = tk.BooleanVar(value=False)
@@ -67,6 +78,11 @@ class BluPress:
         self.fn_tokens       = tk.BooleanVar(value=True)
         self.notify_done     = tk.BooleanVar(value=True)
         self.dark_theme      = tk.BooleanVar(value=True)
+        self.ten_bit         = tk.BooleanVar(value=False)
+        self.audio_only      = tk.BooleanVar(value=False)
+        self.denoise         = tk.StringVar(value='None')
+        self.stabilize       = tk.StringVar(value='None')
+        self.language        = tk.StringVar(value='English')
         self.preset_name     = tk.StringVar(value='')
         self.selected_title  = tk.StringVar(value='')
 
@@ -77,14 +93,16 @@ class BluPress:
         self.original_size   = 0.0
         self.total_duration  = 0.0
         self._audio_rows     = []
+        self.source_fps      = 0.0
 
         self.queue           = []
         self.encode_process  = None
         self.is_encoding     = False
+        self.is_paused       = False
         self._start_time     = 0.0
         self._stderr_buf     = []
-        self._progress_data  = {}
         self._current_item   = None
+        self._external_sub_path = None
         self._current_pass   = 1
         self._out_path_live  = ''
 
@@ -105,6 +123,9 @@ class BluPress:
             self.root.geometry(geom)
         except Exception:
             self.root.geometry('1200x980')
+        lang = self._app_settings.get('language', 'English')
+        self.language.set(lang)
+        set_lang(lang)
         if not self.dark_theme.get():
             C.update(THEMES['light'])
             _configure_ttk()
@@ -113,6 +134,7 @@ class BluPress:
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self._build()
         self._bind_shortcuts()
+        self.language.trace_add('write', lambda *_: self._on_lang_change())
 
         # Async hardware encoder detection after UI is up
         self.root.after(500, self._detect_hw_encoders)
@@ -171,7 +193,7 @@ class BluPress:
         # Thick amber stripe on far left
         tk.Frame(bar, bg=C['amber'], width=6).pack(side=tk.LEFT, fill=tk.Y)
         # Title area
-        tk.Label(bar, text='BLUPRESS', font=('Courier New', 16, 'bold'),
+        tk.Label(bar, text=_('BLUPRESS'), font=('Courier New', 16, 'bold'),
                  bg='#111111', fg=C['amber']).pack(side=tk.LEFT, padx=(10, 4))
         tk.Label(bar, text='// BLU-RAY & DVD COMPRESSOR',
                  font=('Courier New', 9), bg='#111111', fg='#555566',
@@ -202,7 +224,7 @@ class BluPress:
 
     def _left_panel(self, parent):
         # --- Source ---
-        src = Section(parent, 'Source'); src.pack(fill=tk.X, pady=(8,4))
+        src = Section(parent, _('Source')); src.pack(fill=tk.X, pady=(8,4))
         sb = src.body()
         self._src_entry = DropEntry(sb, self.source_path,
                                     on_drop=self._handle_source_drop,
@@ -220,41 +242,41 @@ class BluPress:
         self._src_entry.bind('<FocusOut>', self._on_entry_unfocus)
 
         br = tk.Frame(sb, bg=C['panel']); br.pack(fill=tk.X)
-        AmberButton(br, 'Browse File', self._browse_source, style='normal', width=90, height=26).pack(side=tk.LEFT, padx=(0,3))
-        AmberButton(br, 'Folder',     self._browse_folder, style='normal', width=74, height=26).pack(side=tk.LEFT, padx=(0,3))
+        AmberButton(br, _('Browse File'), self._browse_source, style='normal', width=90, height=26).pack(side=tk.LEFT, padx=(0,3))
+        AmberButton(br, _('Folder'),     self._browse_folder, style='normal', width=74, height=26).pack(side=tk.LEFT, padx=(0,3))
         # Teal Scan button
-        scan_btn = AmberButton(br, 'Scan', self._load_source_info, style='normal', width=66, height=26)
+        scan_btn = AmberButton(br, _('Scan'), self._load_source_info, style='normal', width=66, height=26)
         scan_btn.pack(side=tk.LEFT)
         scan_btn._label.config(fg=C['teal'])
 
 
         # --- Output ---
-        out = Section(parent, 'Output'); out.pack(fill=tk.X, pady=(0,4))
+        out = Section(parent, _('Output')); out.pack(fill=tk.X, pady=(0,4))
         ob = out.body()
         dr = tk.Frame(ob, bg=C['panel']); dr.pack(fill=tk.X, pady=(0,3))
-        _lbl(dr, 'DIR', width=3).pack(side=tk.LEFT)
+        _lbl(dr, _('DIR'), width=3).pack(side=tk.LEFT)
         _entry(dr, self.output_dir).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4,4))
         AmberButton(dr, '...', self._browse_output_dir, style='normal', width=26, height=24).pack(side=tk.LEFT)
         fn = tk.Frame(ob, bg=C['panel']); fn.pack(fill=tk.X, pady=(0,3))
-        _lbl(fn, 'FILE', width=3).pack(side=tk.LEFT)
+        _lbl(fn, _('FILE'), width=3).pack(side=tk.LEFT)
         _entry(fn, self.output_filename).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4,0))
         # Checkbox for auto-name tokens
         tok = tk.Frame(ob, bg=C['panel']); tok.pack(fill=tk.X, pady=(2,0))
         _check(tok, 'Auto-name tokens  {title}_{codec}_{res}_{crf}',
                self.fn_tokens, command=self._refresh_filename).pack(side=tk.LEFT)
         fm = tk.Frame(ob, bg=C['panel']); fm.pack(fill=tk.X, pady=(3,0))
-        _lbl(fm, 'FORMAT', width=4).pack(side=tk.LEFT)
+        _lbl(fm, _('FORMAT'), width=4).pack(side=tk.LEFT)
         fmt_cb = _combo(fm, self.output_format, ['.mkv', '.mp4'], width=5)
         fmt_cb.pack(side=tk.LEFT, padx=4)
 
         # --- Quick Preset ---
-        pre = Section(parent, 'Quick Preset'); pre.pack(fill=tk.X, pady=(0,4))
+        pre = Section(parent, _('Quick Preset')); pre.pack(fill=tk.X, pady=(0,4))
         SegmentedControl(pre.body(),
                          ['Blu-ray','4K UHD','DVD','HD-DVD','Web'],
                          self.disk_type, command=self._apply_preset).pack(fill=tk.X)
 
         # --- Saved Presets ---
-        ps = Section(parent, 'Saved Presets'); ps.pack(fill=tk.X, pady=(0,4))
+        ps = Section(parent, _('Saved Presets')); ps.pack(fill=tk.X, pady=(0,4))
         pb = ps.body()
         pr1 = tk.Frame(pb, bg=C['panel']); pr1.pack(fill=tk.X, pady=(0,3))
         _lbl(pr1, 'Name:', width=5).pack(side=tk.LEFT)
@@ -268,7 +290,7 @@ class BluPress:
         self._refresh_preset_cb()
 
         # --- Estimate ---
-        st = Section(parent, 'File Estimate'); st.pack(fill=tk.X, pady=(0,4))
+        st = Section(parent, _('File Estimate')); st.pack(fill=tk.X, pady=(0,4))
         sg = st.body()
         grid = tk.Frame(sg, bg=C['panel']); grid.pack(fill=tk.X)
         grid.columnconfigure(0, weight=1); grid.columnconfigure(1, weight=1)
@@ -283,18 +305,25 @@ class BluPress:
 
         ac = Section(parent, ''); ac.pack(fill=tk.X, pady=(0,6))
         ab = ac.body()
-        self._btn_start  = AmberButton(ab, 'START ENCODE',    self._start_queue,   style='primary', width=295, height=38)
+        self._btn_start  = AmberButton(ab, _('START ENCODE'),    self._start_queue,   style='primary', width=295, height=38)
         self._btn_start.pack(fill=tk.X, pady=(0,4))
-        self._btn_cancel = AmberButton(ab, 'CANCEL',           self._cancel_encode, style='danger',  width=295, height=30)
+        self._btn_cancel = AmberButton(ab, _('CANCEL'),           self._cancel_encode, style='danger',  width=295, height=30)
         self._btn_cancel.pack(fill=tk.X, pady=(0,4))
         self._btn_cancel.config_state(tk.DISABLED)
+        self._btn_pause = AmberButton(ab, _('PAUSE'),     self._toggle_pause, style='ghost',  width=145, height=26)
+        self._btn_pause.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,2))
+        self._btn_pause.config_state(tk.DISABLED)
+        self._btn_preview = AmberButton(ab, 'PREVIEW',  self._show_preview,  style='ghost',  width=145, height=26)
+        self._btn_preview.pack(side=tk.LEFT, fill=tk.X, expand=True)
         row_btns = tk.Frame(ab, bg=C['panel']); row_btns.pack(fill=tk.X)
-        AmberButton(row_btns, 'COPY CMD',     self._copy_command,    style='ghost', width=97, height=26).pack(side=tk.LEFT, padx=(0,2))
-        AmberButton(row_btns, 'OUTPUT',       self._open_output_dir, style='ghost', width=97, height=26).pack(side=tk.LEFT, padx=(0,2))
-        AmberButton(row_btns, 'LOG',          self._export_log,      style='ghost', width=97, height=26).pack(side=tk.LEFT)
+        AmberButton(row_btns, _('COPY CMD'),     self._copy_command,    style='ghost', width=97, height=26).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(row_btns, _('OUTPUT'),       self._open_output_dir, style='ghost', width=97, height=26).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(row_btns, _('LOG'),          self._export_log,      style='ghost', width=97, height=26).pack(side=tk.LEFT)
         misc = tk.Frame(ab, bg=C['panel']); misc.pack(fill=tk.X, pady=(6,0))
-        _check(misc, 'Dark theme', self.dark_theme, command=self._toggle_theme).pack(side=tk.LEFT)
-        _check(misc, 'Notify', self.notify_done).pack(side=tk.LEFT, padx=10)
+        _check(misc, _('Dark theme'), self.dark_theme, command=self._toggle_theme).pack(side=tk.LEFT)
+        _check(misc, _('Notify'), self.notify_done).pack(side=tk.LEFT, padx=10)
+        _lbl(misc, _('Language'), fg=C['dim'], width=4).pack(side=tk.LEFT)
+        _combo(misc, self.language, LANG_NAMES, width=8).pack(side=tk.LEFT)
 
     # --- RIGHT PANEL ---
 
@@ -320,7 +349,7 @@ class BluPress:
             self._queue_list.itemconfig(i, fg=q.status_color())
 
     def _right_panel(self, parent):
-        q_sec = Section(parent, 'Encode Queue'); q_sec.pack(fill=tk.X, pady=(8,0))
+        q_sec = Section(parent, _('Encode Queue')); q_sec.pack(fill=tk.X, pady=(8,0))
         qb = q_sec.body()
         qf = tk.Frame(qb, bg=C['well'], highlightthickness=1,
                       highlightbackground=C['border'])
@@ -335,14 +364,17 @@ class BluPress:
                                        yscrollcommand=qsb.set)
         self._queue_list.pack(fill=tk.X, padx=4, pady=4)
         self._queue_list.bind('<Button-3>', self._queue_context_menu)
+        self._queue_list.bind('<Button-1>', self._queue_drag_start)
+        self._queue_list.bind('<B1-Motion>', self._queue_drag_motion)
+        self._queue_list.bind('<ButtonRelease-1>', self._queue_drag_reorder)
         qsb.config(command=self._queue_list.yview)
         qr = tk.Frame(qb, bg=C['panel']); qr.pack(fill=tk.X, pady=(0,3))
-        AmberButton(qr, 'Add Files', self._queue_add,        style='normal', width=80, height=24).pack(side=tk.LEFT, padx=(0,2))
-        AmberButton(qr, 'Remove',    self._queue_remove,     style='danger', width=70, height=24).pack(side=tk.LEFT, padx=(0,2))
-        AmberButton(qr, 'Up',        self._queue_up,         style='normal', width=45, height=24).pack(side=tk.LEFT, padx=(0,2))
-        AmberButton(qr, 'Down',      self._queue_down,       style='normal', width=50, height=24).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(qr, _('Add Files'), self._queue_add,        style='normal', width=80, height=24).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(qr, _('Remove'),    self._queue_remove,     style='danger', width=70, height=24).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(qr, _('Up'),        self._queue_up,         style='normal', width=45, height=24).pack(side=tk.LEFT, padx=(0,2))
+        AmberButton(qr, _('Down'),      self._queue_down,       style='normal', width=50, height=24).pack(side=tk.LEFT, padx=(0,2))
         tk.Frame(qr, bg=C['panel']).pack(side=tk.LEFT, expand=True)
-        AmberButton(qr, 'Clear Done', self._queue_clear_done, style='normal', width=85, height=24).pack(side=tk.LEFT)
+        AmberButton(qr, _('Clear Done'), self._queue_clear_done, style='normal', width=85, height=24).pack(side=tk.LEFT)
 
         _sep(parent, C['border']).pack(fill=tk.X, pady=4)
 
@@ -357,7 +389,7 @@ class BluPress:
         _sep(parent, C['border']).pack(fill=tk.X, pady=4)
 
         # Progress section — VU meter + stats
-        pr_sec = Section(parent, 'Encode Progress'); pr_sec.pack(fill=tk.X, pady=(0,4))
+        pr_sec = Section(parent, _('Encode Progress')); pr_sec.pack(fill=tk.X, pady=(0,4))
         pb = pr_sec.body()
         self._prog_bar = VUMeter(pb)
         self._prog_bar.pack(fill=tk.X, pady=(0,4))
@@ -380,7 +412,7 @@ class BluPress:
                                        bg=C['panel'], fg=C['teal'])
         self._live_size_lbl.pack(side=tk.RIGHT, padx=4)
 
-        log_sec = Section(parent, 'Encode Log'); log_sec.pack(fill=tk.BOTH, expand=True)
+        log_sec = Section(parent, _('Encode Log')); log_sec.pack(fill=tk.BOTH, expand=True)
         lf = tk.Frame(log_sec, bg=C['well'],
                       highlightthickness=1, highlightbackground=C['border'])
         lf.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0,4))
@@ -403,7 +435,7 @@ class BluPress:
         bar.pack(fill=tk.X); bar.pack_propagate(False)
         # Dim amber stripe on left
         tk.Frame(bar, bg=C['amber_dim'], width=3).pack(side=tk.LEFT, fill=tk.Y)
-        self._status = tk.Label(bar, text='READY', font=('Courier New', 8, 'bold'),
+        self._status = tk.Label(bar, text=_('READY'), font=('Courier New', 8, 'bold'),
                                 bg='#0a0a0a', fg=C['dim'], anchor=tk.W)
         self._status.pack(side=tk.LEFT, padx=(8,6))
 
@@ -411,9 +443,9 @@ class BluPress:
 
     def _tab_video(self, nb):
         tab = tk.Frame(nb, bg=C['panel2'], padx=16, pady=12)
-        nb.add(tab, text='  VIDEO  ')
+        nb.add(tab, text=f'  {_("VIDEO")}  ')
         r1 = tk.Frame(tab, bg=C['panel2']); r1.pack(fill=tk.X, pady=(0,8))
-        _lbl(r1, 'CODEC', fg=C['dim'], width=8).pack(side=tk.LEFT)
+        _lbl(r1, _('CODEC'), fg=C['dim'], width=8).pack(side=tk.LEFT)
         SegmentedControl(r1, ['H.265','H.264','AV1'],
                          self.video_codec, command=self._on_codec_change).pack(side=tk.LEFT)
         r2 = tk.Frame(tab, bg=C['panel2']); r2.pack(fill=tk.X, pady=(0,6))
@@ -448,18 +480,31 @@ class BluPress:
         _entry(self._bitrate_row, self.target_bitrate, width=10).pack(side=tk.LEFT, padx=4)
         _lbl(self._bitrate_row, '(e.g. 4000k, 8M)', fg=C['dim'], font=TINY).pack(side=tk.LEFT)
         r4 = tk.Frame(tab, bg=C['panel2']); r4.pack(fill=tk.X)
-        _lbl(r4, 'CPU PRESET', fg=C['dim'], width=8).pack(side=tk.LEFT)
+        _lbl(r4, _('CPU PRESET'), fg=C['dim'], width=8).pack(side=tk.LEFT)
         self._sw_preset_cb = _combo(r4, self.sw_preset,
                                     ['ultrafast','superfast','veryfast','faster','fast',
                                      'medium','slow','slower','veryslow'], width=14)
         self._sw_preset_cb.pack(side=tk.LEFT, padx=(0,8))
         self._sw_preset_cb.bind('<<ComboboxSelected>>', lambda e: self._update_estimate())
         _lbl(r4, '(software only)', fg=C['dim'], font=TINY).pack(side=tk.LEFT)
+        r10 = tk.Frame(tab, bg=C['panel2']); r10.pack(fill=tk.X, pady=(6,0))
+        cb_10 = _check(r10, '10-bit encoding (higher color depth, better gradients)',
+                        self.ten_bit)
+        cb_10.pack(side=tk.LEFT)
+        self.tooltip(cb_10, 'Encode in 10-bit depth instead of 8-bit.\n'
+                            'Reduces banding in gradients. Requires compatible encoder.\n'
+                            'For NVENC: uses p010le pixel format.')
+        ra_only = tk.Frame(tab, bg=C['panel2']); ra_only.pack(fill=tk.X, pady=(2,0))
+        cb_ao = _check(ra_only, 'Audio only (strip video, encode audio only)',
+                        self.audio_only)
+        cb_ao.pack(side=tk.LEFT)
+        self.tooltip(cb_ao, 'Extract/convert audio streams only.\n'
+                            'Video stream is discarded entirely.')
         self._toggle_twopass()
 
     def _tab_audio(self, nb):
         tab = tk.Frame(nb, bg=C['panel2'], padx=16, pady=12)
-        nb.add(tab, text='  AUDIO  ')
+        nb.add(tab, text=f'  {_("AUDIO")}  ')
         hdr = tk.Frame(tab, bg=C['panel2']); hdr.pack(fill=tk.X, pady=(0,4))
         for txt, w in [('EN','4'),('STREAM','47'),('CODEC','8'),('BITRATE','7')]:
             tk.Label(hdr, text=txt, font=TINY, bg=C['panel2'],
@@ -474,7 +519,7 @@ class BluPress:
 
     def _tab_subtitles(self, nb):
         tab = tk.Frame(nb, bg=C['panel2'], padx=16, pady=12)
-        nb.add(tab, text='  SUBTITLES  ')
+        nb.add(tab, text=f'  {_("SUBTITLES")}  ')
         r1 = tk.Frame(tab, bg=C['panel2']); r1.pack(fill=tk.X, pady=(0,8))
         _lbl(r1, 'TRACK', fg=C['dim'], width=12).pack(side=tk.LEFT)
         self._sub_track_cb = _combo(r1, self.sub_track_var, ['None'], width=44)
@@ -485,6 +530,11 @@ class BluPress:
         cb_subburn.pack(side=tk.LEFT)
         self.tooltip(cb_subburn, 'Permanently embed subtitles into the video frames.\n'
                                  'Cannot be turned off later. Use soft-mux (MKV) for togglable subs.')
+        extr = tk.Frame(tab, bg=C['panel2']); extr.pack(fill=tk.X, pady=(6,4))
+        AmberButton(extr, 'EXTRACT SUBS', self._extract_subtitles,
+                    style='normal', width=140, height=26).pack(side=tk.LEFT, padx=(0,4))
+        AmberButton(extr, 'IMPORT EXTERNAL', self._import_external_subtitle,
+                    style='normal', width=150, height=26).pack(side=tk.LEFT)
         info = tk.Frame(tab, bg=C['panel2'],
                         highlightthickness=1, highlightbackground=C['border'])
         info.pack(fill=tk.X, pady=(4,0))
@@ -496,7 +546,7 @@ class BluPress:
 
     def _tab_hardware(self, nb):
         tab = tk.Frame(nb, bg=C['panel2'], padx=16, pady=12)
-        nb.add(tab, text='  HARDWARE  ')
+        nb.add(tab, text=f'  {_("HARDWARE")}  ')
         # Hardware selector cards
         hw_frame = tk.Frame(tab, bg=C['panel2'])
         hw_frame.pack(fill=tk.X, pady=(0,10))
@@ -552,7 +602,7 @@ class BluPress:
 
     def _tab_advanced(self, nb):
         tab = tk.Frame(nb, bg=C['panel2'], padx=16, pady=12)
-        nb.add(tab, text='  ADVANCED  ')
+        nb.add(tab, text=f'  {_("ADVANCED")}  ')
         r1 = tk.Frame(tab, bg=C['panel2']); r1.pack(fill=tk.X, pady=(0,8))
         _lbl(r1, 'RESOLUTION', fg=C['dim'], width=12).pack(side=tk.LEFT)
         res_cb = _combo(r1, self.resolution,
@@ -573,6 +623,33 @@ class BluPress:
         deint_cb.pack(side=tk.LEFT)
         self.tooltip(deint_cb, 'Deinterlace methods for interlaced content (e.g. DVDs, TV captures).\n'
                                'Yadif is the most common. BWDIF is a modern alternative.')
+        r_fps = tk.Frame(tab, bg=C['panel2']); r_fps.pack(fill=tk.X, pady=(0,8))
+        _lbl(r_fps, 'FRAMERATE', fg=C['dim'], width=12).pack(side=tk.LEFT)
+        fps_cb = _combo(r_fps, self.framerate,
+                        list(FRAMERATE_MAP.keys()), width=18)
+        fps_cb.pack(side=tk.LEFT)
+        self.tooltip(fps_cb, 'Convert framerate. "Source" passes through the original framerate.\n'
+                             'Useful for PAL/NTSC conversion or VFR→CFR.')
+        r_denoise = tk.Frame(tab, bg=C['panel2']); r_denoise.pack(fill=tk.X, pady=(0,8))
+        _lbl(r_denoise, 'DENOISE', fg=C['dim'], width=12).pack(side=tk.LEFT)
+        _combo(r_denoise, self.denoise, DENOISE_MODES, width=22).pack(side=tk.LEFT)
+        self.tooltip(r_denoise, 'Apply denoising filter before encoding.\n'
+                                'hqdn3d: high-quality 3D denoiser\n'
+                                'nlmeans: non-local means (slower but better)')
+        r_stab = tk.Frame(tab, bg=C['panel2']); r_stab.pack(fill=tk.X, pady=(0,8))
+        _lbl(r_stab, 'STABILIZE', fg=C['dim'], width=12).pack(side=tk.LEFT)
+        _combo(r_stab, self.stabilize, STABILIZE_MODES, width=22).pack(side=tk.LEFT)
+        self.tooltip(r_stab, 'Video stabilization using vidstab.\n'
+                             'First pass runs detect, second pass applies transform.\n'
+                             'Adds encoding time. Works best on handheld/shaky footage.')
+        r_hdr = tk.Frame(tab, bg=C['panel2']); r_hdr.pack(fill=tk.X, pady=(0,8))
+        _lbl(r_hdr, 'HDR MODE', fg=C['dim'], width=12).pack(side=tk.LEFT)
+        hdr_cb = _combo(r_hdr, self.hdr_mode, HDR_MODES, width=24)
+        hdr_cb.pack(side=tk.LEFT)
+        self.tooltip(hdr_cb, 'HDR/Dolby Vision handling.\n'
+                             '"None" passes through metadata as-is.\n'
+                             '"Tonemap" converts HDR to standard SDR (BT.709).\n'
+                             'GPU tonemap requires compatible hardware + drivers.')
         r3 = tk.Frame(tab, bg=C['panel2']); r3.pack(fill=tk.X, pady=(0,8))
         cb_an = _check(r3, 'ANAMORPHIC  (setdar 16:9 - widescreen DVDs stored as 720x576/480)',
                         self.anamorphic)
@@ -814,9 +891,10 @@ class BluPress:
         threading.Thread(target=self._scan_worker, args=(src,), daemon=True).start()
 
     def _scan_worker(self, src):
+        ffprobe = self._get_ffprobe()
         try:
-            cmd = [self._get_ffprobe(),'-v','quiet','-print_format','json',
-                   '-show_streams','-show_format','-show_chapters', src]
+            cmd = [ffprobe, '-v', 'quiet', '-print_format', 'json',
+                   '-show_streams', '-show_format', '-show_chapters', src]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
                 stderr = r.stderr.strip()[:500] if r.stderr else 'unknown error'
@@ -850,35 +928,22 @@ class BluPress:
             ))
 
     def _process_scan(self, info, src):
-        self.source_info   = info
-        self.audio_streams = []
-        self.sub_streams   = []
-        vid = None
-        for s in info.get('streams', []):
-            ct    = s.get('codec_type','')
-            idx   = s.get('index','?')
-            lang  = s.get('tags',{}).get('language','und')
-            title = s.get('tags',{}).get('title','')
-            cname = s.get('codec_name','?')
-            if ct == 'video' and vid is None:
-                vid = s
-            elif ct == 'audio':
-                codec = cname.upper()
-                ch    = s.get('channels','?')
-                label = f'[{idx}] {codec} {ch}ch - {lang}'
-                if title: label += f' ({title})'
-                self.audio_streams.append((idx, label, cname))
-            elif ct == 'subtitle':
-                codec = cname.upper()
-                label = f'[{idx}] {codec} - {lang}'
-                if title: label += f' ({title})'
-                self.sub_streams.append((idx, label, cname))
-        chapters = info.get('chapters', [])
-        fmt = info.get('format', {})
-        try:    self.total_duration = float(fmt.get('duration', 0))
-        except: self.total_duration = 0.0
-        try:    self.original_size = int(fmt.get('size', 0)) / (1024**3)
-        except: self.original_size = 0.0
+        self.source_info = info
+        parsed = scanner.parse_streams(info)
+        self.audio_streams = parsed['audio_streams']
+        self.sub_streams   = parsed['sub_streams']
+        self.total_duration = parsed['total_duration']
+        self.original_size  = parsed['original_size']
+        vid = parsed['video']
+        # Parse source frame rate for FPS estimation
+        fps_str = vid.get('avg_frame_rate', vid.get('r_frame_rate', '0/1')) if vid else '0/1'
+        try:
+            num, den = fps_str.split('/')
+            self.source_fps = float(num) / float(den) if float(den) > 0 else 0.0
+        except (ValueError, ZeroDivisionError):
+            self.source_fps = 0.0
+        chapters = parsed['chapters']
+
         self._sub_track_cb['values'] = ['None'] + [l for _,l,_ in self.sub_streams]
         self.sub_track_var.set('None')
         for w in self._audio_rows: w.destroy()
@@ -895,8 +960,10 @@ class BluPress:
             self._no_audio_lbl.pack(anchor=tk.W, pady=4)
         self.output_dir.set(str(Path(src).parent))
         self._refresh_filename()
-        h=int(self.total_duration//3600); m=int((self.total_duration%3600)//60); s=int(self.total_duration%60)
-        self._log_ts('-'*44, 'head')
+        h = int(self.total_duration // 3600)
+        m = int((self.total_duration % 3600) // 60)
+        s = int(self.total_duration % 60)
+        self._log_ts('-' * 44, 'head')
         self._log_ts(f'File     : {Path(src).name}', 'warn')
         self._log_ts(f'Size     : {self.original_size:.2f} GB', 'ok')
         self._log_ts(f'Duration : {h:02d}:{m:02d}:{s:02d}', 'ok')
@@ -907,16 +974,18 @@ class BluPress:
                          f'{w}x{h} '
                          f'@{vid.get("r_frame_rate","?")} fps', 'ok')
             if w > 0 and h > 0:
-                auto_disk = '4K UHD' if w >= 3840 else 'Blu-ray' if w >= 1920 else 'DVD'
-                if auto_disk != self.disk_type.get():
+                auto_disk = scanner.auto_detect_disk_type(w)
+                if auto_disk and auto_disk != self.disk_type.get():
                     self.disk_type.set(auto_disk)
                     self._apply_preset()
                     self._log_ts(f'Auto-detected source as {auto_disk}', 'ok')
-        for _,al,_ in self.audio_streams: self._log_ts(f'Audio    : {al}', 'info')
-        for _,sl,_ in self.sub_streams:   self._log_ts(f'Sub      : {sl}', 'info')
+        for _, al, _ in self.audio_streams:
+            self._log_ts(f'Audio    : {al}', 'info')
+        for _, sl, _ in self.sub_streams:
+            self._log_ts(f'Sub      : {sl}', 'info')
         if chapters:
             self._log_ts(f'Chapters : {len(chapters)} found', 'ok')
-        self._log_ts('-'*44, 'head')
+        self._log_ts('-' * 44, 'head')
         self._badge_src.config(text=f'{self.original_size:.2f} GB')
         self._update_estimate()
         self._set_status(f'Loaded: {Path(src).name} ({self.original_size:.2f} GB)')
@@ -979,25 +1048,25 @@ class BluPress:
         crf    = self.quality.get()
         codec  = self.video_codec.get()
         preset = self.sw_preset.get()
-        cf   = {'H.265':0.45,'H.264':0.80,'AV1':0.30}.get(codec, 0.50)
-        qf   = (51-crf)/51.0
+        cf     = CODEC_SIZE_FACTOR.get(codec, 0.50)
+        qf     = (51 - crf) / 51.0
         if self.use_nvenc.get():
-            hwf = {'H.265':1.8,'H.264':1.5,'AV1':2.3}.get(codec, 1.8)
+            hwf = HW_SIZE_FACTOR['nvenc'].get(codec, 1.8)
         elif self.use_qsv.get():
-            hwf = {'H.265':1.5,'H.264':1.3,'AV1':2.0}.get(codec, 1.5)
+            hwf = HW_SIZE_FACTOR['qsv'].get(codec, 1.5)
         elif self.use_amf.get():
-            hwf = {'H.265':1.6,'H.264':1.4,'AV1':2.1}.get(codec, 1.6)
+            hwf = HW_SIZE_FACTOR['amf'].get(codec, 1.6)
         else:
             hwf = 1.0
-        ratio = max(0.02, min(cf*qf*hwf, 1.5))
+        ratio = max(0.02, min(cf * qf * hwf, 1.5))
         est   = self.original_size * ratio
-        saving = (1.0-ratio)*100.0
+        saving = (1.0 - ratio) * 100.0
         speed = 2.5
         if self.use_nvenc.get() or self.use_qsv.get() or self.use_amf.get():
             speed *= 3.5
-        if preset in ['ultrafast','superfast','veryfast','faster','fast']: speed *= 1.8
-        elif preset in ['slow','slower','veryslow']: speed *= 0.45
-        if codec == 'AV1': speed *= 0.25
+        speed *= SW_PRESET_SPEED_MULTIPLIER.get(preset, 1.0)
+        if codec == 'AV1':
+            speed *= 0.25
         eta = max(1, self.original_size / speed)
         self._stat_orig.set(f'{self.original_size:.2f} GB')
         self._stat_out.set(f'{est:.2f} GB')
@@ -1011,12 +1080,7 @@ class BluPress:
 
     def _apply_preset(self):
         p = self.disk_type.get()
-        MAP = {'Blu-ray':('H.265',20,'medium','Source'),
-               '4K UHD': ('H.265',18,'slow',  'Source'),
-               'DVD':    ('H.264',22,'fast',  '480p (854x480)'),
-               'HD-DVD': ('H.264',20,'medium','Source'),
-               'Web':    ('H.265',24,'veryfast','720p (1280x720)')}
-        codec,crf,preset,res = MAP.get(p,('H.265',20,'medium','Source'))
+        codec, crf, preset, res = QUICK_PRESET_MAP.get(p, ('H.265', 20, 'medium', 'Source'))
         self.video_codec.set(codec); self.quality.set(crf)
         self._crf_lbl.config(text=str(crf)); self._draw_crf_slider()
         self.sw_preset.set(preset); self.resolution.set(res)
@@ -1035,6 +1099,8 @@ class BluPress:
             'aspect_ratio':  self.aspect_ratio.get(),
             'anamorphic':    self.anamorphic.get(),
             'deinterlace':   self.deinterlace.get(),
+            'framerate':     self.framerate.get(),
+            'hdr_mode':      self.hdr_mode.get(),
             'use_nvenc':     self.use_nvenc.get(),
             'use_qsv':       self.use_qsv.get(),
             'use_amf':       self.use_amf.get(),
@@ -1045,6 +1111,10 @@ class BluPress:
             'use_crop':      self.use_crop.get(),
             'crop_values':   self.crop_values.get(),
             'keep_chapters': self.keep_chapters.get(),
+            'ten_bit':       self.ten_bit.get(),
+            'audio_only':    self.audio_only.get(),
+            'denoise':       self.denoise.get(),
+            'stabilize':     self.stabilize.get(),
         }
 
     def _set_window_icon(self):
@@ -1074,6 +1144,8 @@ class BluPress:
         self.aspect_ratio.set(s.get('aspect_ratio','Source'))
         self.anamorphic.set(s.get('anamorphic',False))
         self.deinterlace.set(s.get('deinterlace','None'))
+        self.framerate.set(s.get('framerate','Source'))
+        self.hdr_mode.set(s.get('hdr_mode','None (passthrough)'))
         self.use_nvenc.set(s.get('use_nvenc',False))
         self.use_qsv.set(s.get('use_qsv',False))
         self.use_amf.set(s.get('use_amf',False))
@@ -1084,6 +1156,10 @@ class BluPress:
         self.use_crop.set(s.get('use_crop',False))
         self.crop_values.set(s.get('crop_values',''))
         self.keep_chapters.set(s.get('keep_chapters',True))
+        self.ten_bit.set(s.get('ten_bit',False))
+        self.audio_only.set(s.get('audio_only',False))
+        self.denoise.set(s.get('denoise','None'))
+        self.stabilize.set(s.get('stabilize','None'))
         self._toggle_hw()
         self._update_estimate()
 
@@ -1165,6 +1241,7 @@ class BluPress:
         self._app_settings['dark_theme'] = self.dark_theme.get()
         self._app_settings['notify_done'] = self.notify_done.get()
         self._app_settings['ffmpeg_path'] = self.ffmpeg_path.get()
+        self._app_settings['language'] = self.language.get()
         try:
             self._app_settings['window_geometry'] = self.root.geometry()
         except Exception:
@@ -1270,125 +1347,7 @@ class BluPress:
     # ==================== FFMPEG COMMAND BUILDER ====================
 
     def _build_cmd(self, src: str, out_path: str, settings: dict, pass_num: int = 0):
-        cmd   = [self._get_ffmpeg(), '-y', '-i', src]
-        crf   = str(settings['quality'])
-        codec = settings['video_codec']
-        hw    = settings['use_nvenc'] or settings['use_qsv'] or settings['use_amf']
-
-        if settings['two_pass'] and not hw:
-            bitrate = settings['target_bitrate']
-            if codec == 'H.265':
-                vc = 'libx265'
-                if pass_num == 1:
-                    cmd += ['-c:v', vc, '-b:v', bitrate, '-x265-params', 'pass=1',
-                            '-preset', settings['sw_preset'], '-an', '-f', 'null']
-                    cmd.append('/dev/null' if platform.system() != 'Windows' else 'NUL')
-                    return cmd
-                else:
-                    cmd += ['-c:v', vc, '-b:v', bitrate, '-x265-params', 'pass=2',
-                            '-preset', settings['sw_preset']]
-            else:
-                vc = 'libx264' if codec == 'H.264' else 'libaom-av1'
-                if pass_num == 1:
-                    cmd += ['-c:v', vc, '-b:v', bitrate, '-pass', '1',
-                            '-preset' if codec != 'AV1' else '-cpu-used', settings['sw_preset'] if codec != 'AV1' else '4',
-                            '-an', '-f', 'null']
-                    cmd.append('/dev/null' if platform.system() != 'Windows' else 'NUL')
-                    return cmd
-                else:
-                    cmd += ['-c:v', vc, '-b:v', bitrate, '-pass', '2',
-                            '-preset' if codec != 'AV1' else '-cpu-used', settings['sw_preset'] if codec != 'AV1' else '4']
-        elif settings['use_nvenc']:
-            vc = {'H.265':'hevc_nvenc','H.264':'h264_nvenc','AV1':'av1_nvenc'}.get(codec,'hevc_nvenc')
-            hw_p = settings['hw_preset'].split()[0]
-            cmd += ['-c:v', vc, '-preset', hw_p, '-rc', 'vbr', '-cq', crf]
-        elif settings['use_amf']:
-            vc = {'H.265':'hevc_amf','H.264':'h264_amf','AV1':'av1_amf'}.get(codec,'hevc_amf')
-            cmd += ['-c:v', vc, '-quality', settings['amf_quality'],
-                    '-rc', 'cqp', '-qp_i', crf, '-qp_p', crf, '-qp_b', crf]
-        elif settings['use_qsv']:
-            vc = {'H.265':'hevc_qsv','H.264':'h264_qsv','AV1':'av1_qsv'}.get(codec,'hevc_qsv')
-            cmd += ['-c:v', vc, '-global_quality', crf, '-preset', settings['qsv_preset']]
-        else:
-            vc = {'H.265':'libx265','H.264':'libx264','AV1':'libaom-av1'}.get(codec,'libx265')
-            if codec == 'AV1':
-                cmd += ['-c:v', vc, '-crf', crf, '-cpu-used', '4', '-row-mt', '1']
-            else:
-                cmd += ['-c:v', vc, '-crf', crf, '-preset', settings['sw_preset']]
-
-        filters = []
-        res_map = {'4K (3840x2160)':'3840:2160','1080p (1920x1080)':'1920:1080',
-                   '720p (1280x720)':'1280:720','576p (1024x576)':'1024:576','480p (854x480)':'854:480'}
-        if settings['resolution'] in res_map:
-            filters.append(f"scale={res_map[settings['resolution']]}:flags=lanczos")
-        if settings['use_crop'] and settings['crop_values']:
-            filters.append(f"crop={settings['crop_values']}")
-        ar_map = {'16:9':'16/9','4:3':'4/3','2.35:1':'2.35','2.39:1':'2.39','1.85:1':'1.85'}
-        if settings['aspect_ratio'] in ar_map:
-            filters.append(f"setdar={ar_map[settings['aspect_ratio']]}")
-        elif settings['anamorphic']:
-            filters.append('setdar=16/9')
-        deint_map = {'Yadif (fast)':'yadif=0','Yadif (slow/better)':'yadif=1',
-                     'BWDIF':'bwdif=0','Decomb':'yadif=2','Bob':'yadif=1:1'}
-        if settings['deinterlace'] in deint_map:
-            filters.append(deint_map[settings['deinterlace']])
-
-        sub_idx = settings.get('sub_idx')
-        is_bitmap = settings.get('sub_is_bitmap', False)
-        if sub_idx is not None and settings['sub_burn'] and not is_bitmap:
-            filters.append(f"subtitles={_quote_path_for_filter(src)}:si={sub_idx}")
-
-        if filters:
-            cmd += ['-vf', ','.join(filters)]
-
-        vid_done = False
-        if sub_idx is not None and settings['sub_burn'] and is_bitmap:
-            if '-vf' in cmd:
-                vi = cmd.index('-vf'); chain = cmd[vi+1]
-                cmd = cmd[:vi] + cmd[vi+2:]
-                fc = f'[0:v]{chain}[vb];[vb][0:{sub_idx}]overlay[vout]'
-            else:
-                fc = f'[0:v][0:{sub_idx}]overlay[vout]'
-            cmd += ['-filter_complex', fc, '-map', '[vout]']
-            vid_done = True
-
-        if settings['keep_chapters']:
-            cmd += ['-map_chapters', '0']
-
-        audio_tracks = settings.get('audio_tracks', [])
-        audio_configured = 'audio_tracks' in settings
-        if not vid_done:
-            cmd += ['-map', '0:v:0']
-
-        if audio_tracks:
-            for track_idx, acodec, abitrate in audio_tracks:
-                cmd += ['-map', f'0:{track_idx}']
-            for i, (track_idx, acodec, abitrate) in enumerate(audio_tracks):
-                acodec_l = acodec.lower()
-                if acodec_l in ('copy','passthrough'):
-                    cmd += [f'-c:a:{i}', 'copy']
-                elif acodec_l == 'aac':
-                    cmd += [f'-c:a:{i}', 'aac', f'-b:a:{i}', abitrate]
-                elif acodec_l == 'flac':
-                    cmd += [f'-c:a:{i}', 'flac']
-                elif acodec_l == 'opus':
-                    cmd += [f'-c:a:{i}', 'libopus', f'-b:a:{i}', abitrate]
-                elif acodec_l == 'mp3':
-                    cmd += [f'-c:a:{i}', 'libmp3lame', f'-b:a:{i}', abitrate]
-                else:
-                    cmd += [f'-c:a:{i}', 'copy']
-        elif not audio_configured:
-            # No audio setting captured — default: copy all tracks
-            cmd += ['-map', '0:a?', '-c:a', 'copy']
-
-        if sub_idx is not None and not settings['sub_burn']:
-            cmd += ['-map', f'0:{sub_idx}', '-c:s', 'copy']
-        else:
-            cmd += ['-sn']
-
-        cmd += ['-progress', 'pipe:1', '-nostats']
-        cmd.append(out_path)
-        return cmd
+        return encoder.build_cmd(self._get_ffmpeg(), src, out_path, settings, pass_num)
 
     def _collect_settings(self) -> dict:
         s = self._settings_snapshot()
@@ -1401,11 +1360,10 @@ class BluPress:
         if self.sub_streams:
             sub_val = self.sub_track_var.get()
             sub_idx = None; sub_is_bitmap = False
-            BITMAP = {'dvd_subtitle','hdmv_pgs_subtitle','dvbsub','xsub'}
             if sub_val != 'None':
                 for idx, label, cname in self.sub_streams:
                     if label == sub_val:
-                        sub_idx = idx; sub_is_bitmap = cname.lower() in BITMAP; break
+                        sub_idx = idx; sub_is_bitmap = cname.lower() in BITMAP_SUB_FORMATS; break
             s['sub_idx']       = sub_idx
             s['sub_is_bitmap'] = sub_is_bitmap
         return s
@@ -1445,8 +1403,11 @@ class BluPress:
         if self.is_encoding:
             return
         self.is_encoding = True
+        self.is_paused = False
         self._btn_start.config_state(tk.DISABLED)
         self._btn_cancel.config_state(tk.NORMAL)
+        self._btn_pause.config_state(tk.NORMAL)
+        self._btn_pause.set_text('PAUSE')
         total = len(self.queue)
         self._set_status(f'Encoding 1 of {total} — queue running')
         threading.Thread(target=self._queue_worker, daemon=True).start()
@@ -1496,20 +1457,25 @@ class BluPress:
         self.root.after(0, self._encode_all_done)
 
     def _scan_duration(self, src: str):
-        try:
-            cmd = [self._get_ffprobe(), '-v', 'quiet', '-print_format', 'json',
-                   '-show_format', src]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if r.returncode == 0:
-                info = json.loads(r.stdout)
-                fmt = info.get('format', {})
-                self.total_duration = float(fmt.get('duration', 0))
-            else:
-                self.total_duration = 0.0
-        except Exception:
-            self.total_duration = 0.0
+        self.total_duration = scanner.scan_duration(src, self._get_ffprobe())
 
     def _encode_item(self, src: str, out_path: str, settings: dict) -> bool:
+        # Stabilize detect pass (runs before main encode if needed)
+        stabilize = settings.get('stabilize', 'None')
+        if stabilize != 'None' and stabilize in STABILIZE_FILTER_MAP:
+            stab_cmd = encoder.build_stabilize_detect_cmd(
+                self._get_ffmpeg(), src, settings)
+            if stab_cmd:
+                self.root.after(0, lambda: self._log_ts(
+                    'Stabilize: running detect pass...', 'warn'))
+                try:
+                    subprocess.run(stab_cmd, capture_output=True, text=True, timeout=300)
+                except subprocess.TimeoutExpired:
+                    self.root.after(0, lambda: self._log_ts(
+                        'Stabilize detect timed out', 'err'))
+                except Exception as e:
+                    self.root.after(0, lambda: self._log_ts(
+                        f'Stabilize detect error: {e}', 'err'))
         two_pass = settings['two_pass'] and not (
             settings['use_nvenc'] or settings['use_amf'] or settings['use_qsv'])
         passes = [1, 2] if two_pass else [0]
@@ -1520,25 +1486,34 @@ class BluPress:
             cmd = self._build_cmd(src, out_path, settings, pass_num)
             self.root.after(0, lambda c=cmd: self._log_ts(f'CMD: {" ".join(c)}', 'info'))
             self._start_time = time.time()
-            self._vu_reset()
+            self.root.after(0, self._vu_reset)
+            # Compute estimated output bytes for file-size-based progress
+            codec = settings.get('video_codec', 'H.265')
+            crf = settings.get('quality', 20)
+            cf = CODEC_SIZE_FACTOR.get(codec, 0.50)
+            qf = (51 - crf) / 51.0
+            hw = settings.get('use_nvenc', False) or settings.get('use_qsv', False) or settings.get('use_amf', False)
+            if hw:
+                if settings.get('use_nvenc'): hwf = HW_SIZE_FACTOR['nvenc'].get(codec, 1.8)
+                elif settings.get('use_qsv'): hwf = HW_SIZE_FACTOR['qsv'].get(codec, 1.5)
+                else: hwf = HW_SIZE_FACTOR['amf'].get(codec, 1.6)
+            else:
+                hwf = 1.0
+            ratio = max(0.02, min(cf * qf * hwf, 1.5))
+            self._estimated_bytes = max(1, int(self.original_size * ratio * (1024**3)))
             try:
                 self.encode_process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1)
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             except FileNotFoundError:
                 self.root.after(0, lambda: messagebox.showerror(
                     'FFmpeg Not Found', 'Install FFmpeg and add to PATH.'))
                 return False
             self._stderr_buf = []
-            self._progress_data = {}
             stderr_t = threading.Thread(target=self._drain_stderr, daemon=True)
             stderr_t.start()
-            stdout_t = threading.Thread(target=self._drain_stdout, daemon=True)
-            stdout_t.start()
             self.root.after(80, lambda: self._poll(src))
             self.encode_process.wait()
             stderr_t.join(timeout=3)
-            stdout_t.join(timeout=3)
             rc = self.encode_process.returncode
             if rc != 0 and self.is_encoding:
                 tail = ''.join(self._stderr_buf[-40:]).strip()
@@ -1550,78 +1525,44 @@ class BluPress:
     def _drain_stderr(self):
         try:
             for line in self.encode_process.stderr:
-                self._stderr_buf.append(line)
+                self._stderr_buf.append(line.decode('utf-8', errors='replace'))
         except Exception:
             pass
-
-    def _drain_stdout(self):
-        """Read ffmpeg -progress lines from stdout in a background thread.
-        Builds a key=value dict from each progress block and forwards it."""
-        buf = ''
-        try:
-            for char in iter(lambda: self.encode_process.stdout.read(1), ''):
-                buf += char
-                if char == '\n' and buf.strip():
-                    line = buf.strip()
-                    buf = ''
-                    if '=' in line:
-                        k, _, v = line.partition('=')
-                        self._progress_data[k.strip()] = v.strip()
-                    if line == 'progress=continue' or line == 'progress=end':
-                        data = dict(self._progress_data)
-                        self._progress_data.clear()
-                        self.root.after(0, lambda d=data: self._apply_progress(d))
-        except Exception:
-            pass
-
-    def _apply_progress(self, data: dict):
-        """Apply a parsed ffmpeg progress dict to the UI."""
-        # out_time_us (microseconds) is preferred; fall back to out_time_ms
-        time_us = data.get('out_time_us', data.get('out_time_ms', '0'))
-        try:
-            cur = int(time_us) / 1_000_000
-        except (ValueError, TypeError):
-            cur = 0
-        if cur > 0:
-            self._update_progress_from_time(cur)
-        fps_val = data.get('fps', '')
-        if fps_val:
-            try:
-                fv = float(fps_val)
-                self._prog_fps.config(text=f'{fv:.1f} fps')
-            except ValueError:
-                pass
 
     def _poll(self, src):
         if not self.is_encoding or self.encode_process is None:
             return
+        # Calculate progress from output file size (reliable, no buffering issues)
+        if self._out_path_live:
+            try:
+                cur = os.path.getsize(self._out_path_live)
+                est = getattr(self, '_estimated_bytes', 0)
+                td = self.total_duration
+                if est > 0 and td > 0:
+                    pct = min(cur / est * 100, 99)
+                    cur_time = (pct / 100) * td
+                    if self._current_item:
+                        self._current_item.progress = pct
+                    elapsed = time.time() - self._start_time
+                    if cur_time > 0 and elapsed > 0:
+                        speed_x = cur_time / elapsed
+                        fps = self.source_fps * speed_x
+                        speed_str = f'{fps:.0f} fps' if fps < 200 else f'{fps/1000:.1f}k fps'
+                    else:
+                        speed_str = ''
+                    self.root.after(0, lambda p=pct, ct=cur_time, td=td, sp=speed_str: (
+                        self._prog_bar.set(p),
+                        self._prog_pct.config(text=f'{p:.1f}%'),
+                        self._prog_det.config(
+                            text=f'{int(ct//3600):02d}:{int((ct%3600)//60):02d}:{int(ct%60):02d}'
+                                 f' / {int(td//3600):02d}:{int((td%3600)//60):02d}:{int(td%60):02d}'),
+                        self._prog_fps.config(text=sp),
+                    ))
+            except OSError:
+                pass
         self.root.after(0, self._update_live_size)
         if self.encode_process.poll() is None:
             self.root.after(200, lambda: self._poll(src))
-
-    def _update_progress_from_time(self, cur: float):
-        elapsed = time.time() - self._start_time
-        td = self.total_duration
-        if td > 0:
-            pct = min((cur / td) * 100, 100)
-            eta = (elapsed / cur) * (td - cur) if cur > 0 else 0
-        else:
-            pct = 0.0
-            eta = 0
-        if self._current_item:
-            self._current_item.progress = pct
-
-        def _ui(p=pct, e=elapsed, et=eta, c=cur, d=td):
-            if d > 0:
-                self._prog_bar.set(p)
-                self._prog_pct.config(text=f'{p:.1f}%')
-                self._prog_det.config(
-                    text=f'{int(c//3600):02d}:{int((c%3600)//60):02d}:{int(c%60):02d}'
-                         f' / {int(d//3600):02d}:{int((d%3600)//60):02d}:{int(d%60):02d}')
-            else:
-                self._prog_pct.config(text=f'{_fmt_time(c)}')
-        self.root.after(0, _ui)
-        self.root.after(0, self._refresh_queue_list)
 
     def _update_live_size(self):
         if self._out_path_live:
@@ -1675,6 +1616,10 @@ class BluPress:
         self._prog_pass.config(text='')
         self._btn_start.config_state(tk.NORMAL)
         self._btn_cancel.config_state(tk.DISABLED)
+        self._btn_pause.config_state(tk.DISABLED)
+        self._btn_pause.set_text('PAUSE')
+        self._btn_pause.style = 'ghost'
+        self._btn_pause._update_style()
         self._log_ts(f'Queue finished -- {done} done, {errs} errors', 'ok' if errs==0 else 'warn')
         self._set_status(f'Done -- {done} files encoded' if errs==0 else f'{errs} error(s) — check log')
         if self.notify_done.get():
@@ -1700,6 +1645,10 @@ class BluPress:
         self._refresh_queue_list()
         self._btn_start.config_state(tk.NORMAL)
         self._btn_cancel.config_state(tk.DISABLED)
+        self._btn_pause.config_state(tk.DISABLED)
+        self._btn_pause.set_text('PAUSE')
+        self._btn_pause.style = 'ghost'
+        self._btn_pause._update_style()
         self._set_status('Cancelled.')
         self._log_ts('Cancelled by user', 'warn')
 
@@ -1826,11 +1775,7 @@ class BluPress:
         return self.ffmpeg_path.get().strip() or 'ffmpeg'
 
     def _get_ffprobe(self) -> str:
-        fp = self.ffmpeg_path.get().strip()
-        if fp:
-            p = Path(fp)
-            return str(p.parent / 'ffprobe') if p.name == 'ffmpeg' else fp.replace('ffmpeg', 'ffprobe')
-        return 'ffprobe'
+        return _get_ffprobe_path(self.ffmpeg_path.get().strip())
 
     # ==================== TOOLTIP ====================
 
@@ -1924,3 +1869,251 @@ class BluPress:
             self._log_ts(f'Log saved: {log_path}', 'ok')
         except Exception as e:
             messagebox.showerror('Export log', str(e))
+
+    # ==================== LANGUAGE ====================
+
+    def _on_lang_change(self):
+        name = self.language.get()
+        set_lang(name)
+        self._toggle_theme()
+
+    # ==================== PAUSE / RESUME ====================
+
+    def _toggle_pause(self):
+        if not self.encode_process or not self.is_encoding:
+            return
+        if self.is_paused:
+            self._resume_encode()
+        else:
+            self._pause_encode()
+
+    def _pause_encode(self):
+        if platform.system() != 'Windows':
+            try:
+                self.encode_process.send_signal(20)  # SIGTSTP
+                self.is_paused = True
+                self._btn_pause.set_text('RESUME')
+                self._btn_pause.style = 'primary'
+                self._btn_pause._update_style()
+                self._set_status('Paused')
+                self._log_ts('Encoding paused', 'warn')
+            except Exception as e:
+                self._log_ts(f'Pause failed: {e}', 'err')
+        else:
+            self._log_ts('Pause not supported on Windows', 'warn')
+
+    def _resume_encode(self):
+        if platform.system() != 'Windows':
+            try:
+                self.encode_process.send_signal(18)  # SIGCONT
+                self.is_paused = False
+                self._btn_pause.set_text('PAUSE')
+                self._btn_pause.style = 'ghost'
+                self._btn_pause._update_style()
+                self._set_status('Encoding')
+                self._log_ts('Encoding resumed', 'ok')
+            except Exception as e:
+                self._log_ts(f'Resume failed: {e}', 'err')
+        else:
+            self._log_ts('Resume not supported on Windows', 'warn')
+
+    # ==================== PREVIEW / THUMBNAIL ====================
+
+    def _show_preview(self):
+        src = self.source_path.get().strip()
+        if not src:
+            messagebox.showwarning('Preview', 'Load a source file first.')
+            return
+        threading.Thread(target=self._preview_worker, args=(src,), daemon=True).start()
+
+    def _preview_worker(self, src):
+        try:
+            import io
+            from PIL import Image, ImageTk
+            has_pil = True
+        except ImportError:
+            has_pil = False
+
+        # Extract a frame at 10% into the video
+        ffprobe = self._get_ffprobe()
+        try:
+            dur_cmd = [ffprobe, '-v', 'quiet', '-print_format', 'json', '-show_format', src]
+            r = subprocess.run(dur_cmd, capture_output=True, text=True, timeout=15)
+            info = json.loads(r.stdout)
+            dur = float(info.get('format', {}).get('duration', 0))
+        except Exception:
+            dur = 0
+        seek = max(5, int(dur * 0.1)) if dur > 0 else 10
+
+        tmp_dir = Path(tempfile.mkdtemp('blupress_preview'))
+        try:
+            thumb = tmp_dir / 'preview.png'
+            ffmpeg = self._get_ffmpeg()
+            cmd = [ffmpeg, '-ss', str(seek), '-i', src,
+                   '-vframes', '1', '-q:v', '2',
+                   str(thumb)]
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if not thumb.exists():
+                self.root.after(0, lambda: messagebox.showerror(
+                    'Preview', 'Could not extract preview frame.'))
+                return
+
+            self.root.after(0, lambda: self._show_preview_window(str(thumb), src, dur))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror('Preview error', str(e)))
+
+    def _show_preview_window(self, thumb_path, src, duration):
+        win = tk.Toplevel(self.root, bg=C['bg'])
+        win.title(f'Preview — {Path(src).name}')
+        win.geometry('600x500')
+        win.minsize(400, 300)
+
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(thumb_path)
+            max_w, max_h = 560, 340
+            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            tk_img = ImageTk.PhotoImage(img)
+            lbl = tk.Label(win, image=tk_img, bg=C['bg'])
+            lbl.image = tk_img
+            lbl.pack(pady=(10, 5))
+        except ImportError:
+            tk.Label(win, text=f'Thumbnail: {thumb_path}',
+                     bg=C['bg'], fg=C['mid'], font=UI).pack(pady=20)
+
+        info_f = tk.Frame(win, bg=C['bg'])
+        info_f.pack(fill=tk.X, padx=20, pady=5)
+        tk.Label(info_f, text=f'File: {Path(src).name}', font=UI,
+                 bg=C['bg'], fg=C['white']).pack(anchor=tk.W)
+        if duration:
+            h = int(duration // 3600)
+            m = int((duration % 3600) // 60)
+            s = int(duration % 60)
+            tk.Label(info_f, text=f'Duration: {h:02d}:{m:02d}:{s:02d}', font=UI,
+                     bg=C['bg'], fg=C['mid']).pack(anchor=tk.W)
+
+        seek_var = tk.DoubleVar(value=0)
+        seek_f = tk.Frame(win, bg=C['bg'])
+        seek_f.pack(fill=tk.X, padx=20, pady=5)
+        tk.Label(seek_f, text='Seek:', font=UI, bg=C['bg'],
+                 fg=C['dim']).pack(side=tk.LEFT)
+        if duration > 0:
+            tk.Scale(seek_f, from_=0, to=duration, orient=tk.HORIZONTAL,
+                     variable=seek_var, bg=C['bg'], fg=C['amber'],
+                     highlightthickness=0, length=400).pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+
+        btn_f = tk.Frame(win, bg=C['bg'])
+        btn_f.pack(fill=tk.X, padx=20, pady=10)
+        AmberButton(btn_f, 'Extract Frame', lambda: self._extract_frame(src, seek_var.get()),
+                    style='normal', width=120, height=28).pack(side=tk.LEFT, padx=5)
+
+    def _extract_frame(self, src, seek_time):
+        out = filedialog.asksaveasfilename(
+            title='Save frame as...',
+            defaultextension='.png',
+            filetypes=[('PNG', '*.png'), ('JPEG', '*.jpg')])
+        if not out:
+            return
+        threading.Thread(target=self._extract_frame_worker,
+                         args=(src, seek_time, out), daemon=True).start()
+
+    def _extract_frame_worker(self, src, seek_time, out_path):
+        ffmpeg = self._get_ffmpeg()
+        cmd = [ffmpeg, '-ss', str(seek_time), '-i', src,
+               '-vframes', '1', '-q:v', '2', out_path]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            self.root.after(0, lambda: self._log_ts(f'Frame saved: {out_path}', 'ok'))
+        except Exception as e:
+            self.root.after(0, lambda: self._log_ts(f'Frame export error: {e}', 'err'))
+
+    # ==================== SUBTITLE EXTRACT / IMPORT ====================
+
+    def _extract_subtitles(self):
+        src = self.source_path.get().strip()
+        if not src:
+            messagebox.showwarning('Extract', 'Load a source file first.')
+            return
+        if not self.sub_streams:
+            messagebox.showinfo('Extract', 'No subtitle streams found in source.')
+            return
+
+        out_dir = filedialog.askdirectory(title='Output directory for subtitles')
+        if not out_dir:
+            return
+
+        threading.Thread(target=self._extract_subs_worker,
+                         args=(src, out_dir), daemon=True).start()
+
+    def _extract_subs_worker(self, src, out_dir):
+        ffmpeg = self._get_ffmpeg()
+        stem = Path(src).stem
+        for idx, label, cname in self.sub_streams:
+            ext_map = {'subrip': 'srt', 'ass': 'ass', 'ssa': 'ass',
+                       'hdmv_pgs_subtitle': 'sup', 'dvd_subtitle': 'vobsub'}
+            ext = ext_map.get(cname, 'sub')
+            out_path = Path(out_dir) / f'{stem}_track{idx}.{ext}'
+            cmd = [ffmpeg, '-y', '-i', src,
+                   '-map', f'0:{idx}', '-c:s', 'copy',
+                   str(out_path)]
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                self.root.after(0, lambda p=str(out_path): self._log_ts(
+                    f'Subtitle extracted: {p}', 'ok'))
+            except Exception as e:
+                self.root.after(0, lambda e=e: self._log_ts(
+                    f'Subtitle extract failed: {e}', 'err'))
+
+    def _import_external_subtitle(self):
+        f = filedialog.askopenfilename(
+            title='Import external subtitle',
+            filetypes=[('Subtitles', '*.srt *.ass *.ssa *.sub'),
+                       ('All files', '*.*')])
+        if not f:
+            return
+        # Add to sub_streams for processing
+        ext = Path(f).suffix.lower()
+        cname_map = {'.srt': 'subrip', '.ass': 'ass', '.ssa': 'ass', '.sub': 'subrip'}
+        cname = cname_map.get(ext, 'subrip')
+        label = f'[ext] {cname.upper()} - {Path(f).name}'
+        # Assign a high virtual index
+        virt_idx = 100 + len(self.sub_streams)
+        self.sub_streams.append((virt_idx, label, cname))
+        self._sub_track_cb['values'] = ['None'] + [l for _, l, _ in self.sub_streams]
+        self._sub_track_cb.set(label)
+        self._external_sub_path = f
+        self._log_ts(f'External subtitle loaded: {f}', 'ok')
+
+    # ==================== QUEUE DRAG-TO-REORDER ====================
+
+    def _queue_drag_start(self, event):
+        sel = self._queue_list.curselection()
+        if not sel:
+            return
+        self._drag_source = sel[0]
+        self._log_ts(f'Drag start: item {sel[0]}', 'info')
+
+    def _queue_drag_motion(self, event):
+        self._queue_list.selection_clear(0, tk.END)
+        idx = self._queue_list.nearest(event.y)
+        if idx >= 0:
+            self._queue_list.selection_set(idx)
+            self._queue_list.activate(idx)
+
+    def _queue_drag_reorder(self, event):
+        target = self._queue_list.nearest(event.y)
+        src = getattr(self, '_drag_source', None)
+        if src is None or target < 0 or target >= len(self.queue):
+            self._drag_source = None
+            return
+        if src == target:
+            self._drag_source = None
+            return
+        item = self.queue.pop(src)
+        self.queue.insert(target, item)
+        self._refresh_queue_list()
+        self._queue_list.selection_set(target)
+        self._persist_settings()
+        self._log_ts(f'Moved: {item.name}', 'info')
+        self._drag_source = None

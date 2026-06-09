@@ -19,6 +19,7 @@ from blupress.app import BluPress
 
 if __name__ == '__main__':
     if '--cli' in sys.argv:
+        sys.argv.remove('--cli')
         from blupress.cli import main as cli_main
         sys.exit(cli_main())
     root = ROOT()
